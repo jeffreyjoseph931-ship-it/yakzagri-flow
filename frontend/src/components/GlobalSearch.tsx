@@ -1,7 +1,6 @@
 "use client";
 import { t as translateCopy } from "@/lib/i18n";
 
-
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { api, type SearchResultItem } from "@/lib/api";
@@ -28,6 +27,64 @@ const RESULTS_LISTBOX_ID = "global-search-results";
 const SEARCH_HINT_ID = "global-search-hint";
 /** How many rows a PageUp/PageDown jump moves through the result list. */
 const PAGE_JUMP = 10;
+/** localStorage key for persisting recent searches. */
+const RECENT_SEARCHES_KEY = "eziagric:recentSearches";
+/** Maximum number of recent searches to persist. */
+const MAX_RECENT_SEARCHES = 5;
+
+type Scope = "all" | "trades" | "streams" | "disputes";
+
+interface ScopePill {
+  scope: Scope;
+  labelKey:
+    | "ui.filter_all_c2a9b30"
+    | "ui.filter_trades_8e3f1d4"
+    | "ui.filter_streams_5b7c2e8"
+    | "ui.filter_disputes_9d4a6f1";
+}
+
+const SCOPE_PILLS: ScopePill[] = [
+  { scope: "all", labelKey: "ui.filter_all_c2a9b30" },
+  { scope: "trades", labelKey: "ui.filter_trades_8e3f1d4" },
+  { scope: "streams", labelKey: "ui.filter_streams_5b7c2e8" },
+  { scope: "disputes", labelKey: "ui.filter_disputes_9d4a6f1" },
+];
+
+// ── Recent-searches helpers ──────────────────────────────────────────────────
+
+function loadRecentSearches(): string[] {
+  try {
+    const raw = localStorage.getItem(RECENT_SEARCHES_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as string[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveRecentSearch(query: string): void {
+  try {
+    const existing = loadRecentSearches();
+    const deduped = [query, ...existing.filter((q) => q !== query)].slice(
+      0,
+      MAX_RECENT_SEARCHES,
+    );
+    localStorage.setItem(RECENT_SEARCHES_KEY, JSON.stringify(deduped));
+  } catch {
+    // localStorage may be unavailable (e.g. SSR, privacy mode)
+  }
+}
+
+function clearRecentSearches(): void {
+  try {
+    localStorage.removeItem(RECENT_SEARCHES_KEY);
+  } catch {
+    // ignore
+  }
+}
+
+// ── Component ────────────────────────────────────────────────────────────────
 
 interface GlobalSearchProps {
   /** Called when the overlay is dismissed without a selection */
@@ -43,6 +100,8 @@ export function GlobalSearch({ onClose }: GlobalSearchProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [activeIndex, setActiveIndex] = useState(-1);
+  const [scope, setScope] = useState<Scope>("all");
+  const [recentSearches, setRecentSearches] = useState<string[]>([]);
 
   const inputRef = useRef<HTMLInputElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -50,16 +109,50 @@ export function GlobalSearch({ onClose }: GlobalSearchProps) {
   const wasOpenRef = useRef(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // ── Scope → category mapping ───────────────────────────────────────────────
+
+  /**
+   * Maps the active scope to the GroupedResults keys that should be visible.
+   * `streams` maps to `contracts` because the API uses "contracts" internally.
+   * `disputes` has no current API category — it will render empty until the
+   * API adds a disputes category to SearchResponse.
+   */
+  function scopeToCategories(s: Scope): Array<keyof GroupedResults> {
+    switch (s) {
+      case "trades":
+        return ["trades"];
+      case "streams":
+        return ["contracts"];
+      case "disputes":
+        return []; // future: add "disputes" category to GroupedResults
+      case "all":
+      default:
+        return ["trades", "users", "contracts"];
+    }
+  }
+
+  const visibleCategories = scopeToCategories(scope);
+
   const allItems = [
-    ...results.trades.map((r) => ({ ...r, category: "trades" as const })),
-    ...results.users.map((r) => ({ ...r, category: "users" as const })),
-    ...results.contracts.map((r) => ({ ...r, category: "contracts" as const })),
+    ...(visibleCategories.includes("trades")
+      ? results.trades.map((r) => ({ ...r, category: "trades" as const }))
+      : []),
+    ...(visibleCategories.includes("users")
+      ? results.users.map((r) => ({ ...r, category: "users" as const }))
+      : []),
+    ...(visibleCategories.includes("contracts")
+      ? results.contracts.map((r) => ({ ...r, category: "contracts" as const }))
+      : []),
   ];
 
-  const hasResults =
+  const hasResults = allItems.length > 0;
+
+  const hasAnyResults =
     results.trades.length > 0 ||
     results.users.length > 0 ||
     results.contracts.length > 0;
+
+  // ── Open / close ──────────────────────────────────────────────────────────
 
   const open = useCallback(() => {
     setIsOpen(true);
@@ -67,6 +160,8 @@ export function GlobalSearch({ onClose }: GlobalSearchProps) {
     setResults(EMPTY_RESULTS);
     setError(null);
     setActiveIndex(-1);
+    setScope("all");
+    setRecentSearches(loadRecentSearches());
     setTimeout(() => inputRef.current?.focus(), 50);
   }, []);
 
@@ -75,12 +170,12 @@ export function GlobalSearch({ onClose }: GlobalSearchProps) {
     setQuery("");
     setResults(EMPTY_RESULTS);
     setActiveIndex(-1);
+    setScope("all");
     onClose?.();
   }, [onClose]);
 
-  // Focus return: whenever the overlay closes, hand focus back to the trigger
-  // that opened it (ESC, the ESC button, backdrop click and selection all
-  // funnel through `close`, so every dismissal path restores focus).
+  // ── Focus return ──────────────────────────────────────────────────────────
+
   useEffect(() => {
     if (!isOpen && wasOpenRef.current) {
       triggerRef.current?.focus();
@@ -88,7 +183,8 @@ export function GlobalSearch({ onClose }: GlobalSearchProps) {
     wasOpenRef.current = isOpen;
   }, [isOpen]);
 
-  // Cmd+K / Ctrl+K global shortcut
+  // ── Cmd+K / Ctrl+K / Escape ───────────────────────────────────────────────
+
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
       if ((e.metaKey || e.ctrlKey) && e.key === "k") {
@@ -108,7 +204,8 @@ export function GlobalSearch({ onClose }: GlobalSearchProps) {
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [isOpen, open, close]);
 
-  // Debounced search
+  // ── Debounced search ──────────────────────────────────────────────────────
+
   useEffect(() => {
     if (!isOpen) return;
 
@@ -133,6 +230,9 @@ export function GlobalSearch({ onClose }: GlobalSearchProps) {
         const data = await api.search.query(token, query.trim());
         setResults(data);
         setActiveIndex(-1);
+        // Persist successful searches (non-empty API call that resolved)
+        saveRecentSearch(query.trim());
+        setRecentSearches(loadRecentSearches());
       } catch {
         setError("Search failed. Please try again.");
         setResults(EMPTY_RESULTS);
@@ -146,12 +246,16 @@ export function GlobalSearch({ onClose }: GlobalSearchProps) {
     };
   }, [query, isOpen, token]);
 
+  // ── Scroll active option into view ────────────────────────────────────────
+
   useEffect(() => {
     if (!isOpen) return;
     if (activeIndex < 0) return;
     const active = document.getElementById(`search-result-${activeIndex}`);
     active?.scrollIntoView?.({ block: "nearest" });
   }, [activeIndex, isOpen]);
+
+  // ── Handlers ──────────────────────────────────────────────────────────────
 
   function handleSelect(item: SearchResultItem & { category: keyof GroupedResults }) {
     const routes: Record<keyof GroupedResults, string> = {
@@ -161,6 +265,16 @@ export function GlobalSearch({ onClose }: GlobalSearchProps) {
     };
     router.push(routes[item.category]);
     close();
+  }
+
+  function handleRecentSearchClick(term: string) {
+    setQuery(term);
+    inputRef.current?.focus();
+  }
+
+  function handleClearRecent() {
+    clearRecentSearches();
+    setRecentSearches([]);
   }
 
   function handleKeyNavigation(e: React.KeyboardEvent) {
@@ -218,6 +332,14 @@ export function GlobalSearch({ onClose }: GlobalSearchProps) {
     }
   }
 
+  // ── Derived ARIA state ────────────────────────────────────────────────────
+
+  const isExpanded = hasResults;
+  const showHint = !query && recentSearches.length === 0;
+  const showRecentSearches = !query && recentSearches.length > 0;
+
+  // ── Closed state: render the trigger button ───────────────────────────────
+
   if (!isOpen) {
     return (
       <button
@@ -226,17 +348,27 @@ export function GlobalSearch({ onClose }: GlobalSearchProps) {
         aria-label={translateCopy("ui.open_global_search_489a247")}
         className="flex items-center gap-2 rounded-lg border border-border-default bg-bg-elevated px-2 py-1.5 text-sm text-text-muted hover:border-border-hover hover:text-text-secondary transition-colors sm:px-3"
       >
-        <svg className="w-4 h-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+        <svg
+          className="w-4 h-4"
+          viewBox="0 0 16 16"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.8"
+          aria-hidden="true"
+        >
           <circle cx="6.5" cy="6.5" r="4.5" />
           <path d="M10 10l3 3" strokeLinecap="round" />
         </svg>
         <span className="hidden sm:inline">{translateCopy("ui.search_bce0641")}</span>
         <kbd className="ml-1 hidden sm:inline-flex items-center gap-0.5 rounded border border-border-default px-1.5 py-0.5 text-[10px] font-medium text-text-muted">
-          <span>⌘</span>{translateCopy("ui.k_a7ee38b")}
+          <span>⌘</span>
+          {translateCopy("ui.k_a7ee38b")}
         </kbd>
       </button>
     );
   }
+
+  // ── Open state: render the dialog ─────────────────────────────────────────
 
   return (
     <div
@@ -246,22 +378,37 @@ export function GlobalSearch({ onClose }: GlobalSearchProps) {
       aria-label={translateCopy("ui.global_search_a2b8a16")}
       onKeyDown={handleDialogKeyDown}
       className="fixed inset-0 z-50 flex items-start justify-center pt-[12vh] bg-overlay backdrop-blur-sm"
-      onClick={(e) => { if (e.target === e.currentTarget) close(); }}
+      onClick={(e) => {
+        if (e.target === e.currentTarget) close();
+      }}
     >
       <div className="w-full max-w-xl rounded-2xl border border-border-default bg-bg-card shadow-modal overflow-hidden">
-        {/* Search input */}
+        {/* ── Search input row ───────────────────────────────────────────── */}
         <div className="flex items-center gap-3 px-4 py-3 border-b border-border-default">
-          <svg className="w-4 h-4 flex-shrink-0 text-text-muted" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+          <svg
+            className="w-4 h-4 flex-shrink-0 text-text-muted"
+            viewBox="0 0 16 16"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            aria-hidden="true"
+          >
             <circle cx="6.5" cy="6.5" r="4.5" />
             <path d="M10 10l3 3" strokeLinecap="round" />
           </svg>
           <input
             ref={inputRef}
             type="text"
-            role="searchbox"
+            role="combobox"
             aria-label={translateCopy("ui.search_trades_users_and_contract_3948f3a")}
-            aria-controls="global-search-results"
-            aria-activedescendant={activeIndex >= 0 ? `search-result-${activeIndex}` : undefined}
+            aria-autocomplete="list"
+            aria-haspopup="listbox"
+            aria-expanded={isExpanded}
+            aria-controls={isExpanded ? RESULTS_LISTBOX_ID : undefined}
+            aria-activedescendant={
+              activeIndex >= 0 ? `search-result-${activeIndex}` : undefined
+            }
+            aria-describedby={showHint ? SEARCH_HINT_ID : undefined}
             placeholder={translateCopy("ui.search_trades_users_contracts_204acaf")}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
@@ -269,7 +416,14 @@ export function GlobalSearch({ onClose }: GlobalSearchProps) {
             className="flex-1 bg-transparent text-sm text-text-primary placeholder:text-text-muted outline-none"
           />
           {loading && (
-            <svg className="w-4 h-4 animate-spin text-text-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+            <svg
+              className="w-4 h-4 animate-spin text-text-muted"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              aria-hidden="true"
+            >
               <circle cx="12" cy="12" r="10" strokeOpacity="0.25" />
               <path d="M12 2a10 10 0 0 1 10 10" />
             </svg>
@@ -283,35 +437,60 @@ export function GlobalSearch({ onClose }: GlobalSearchProps) {
           </button>
         </div>
 
-        {/* Results */}
-        <div id="global-search-results" className="max-h-[60vh] overflow-y-auto p-2" role="listbox" aria-label={translateCopy("ui.search_results_0144dae")}>
-          {error && (
-            <p className="px-3 py-4 text-center text-sm text-status-danger">{error}</p>
-          )}
+        {/* ── Scope filter pills ─────────────────────────────────────────── */}
+        <div
+          role="group"
+          aria-label="Filter by category"
+          className="flex items-center gap-1.5 px-4 py-2 border-b border-border-default overflow-x-auto"
+        >
+          {SCOPE_PILLS.map(({ scope: s, labelKey }) => (
+            <button
+              key={s}
+              onClick={() => {
+                setScope(s);
+                setActiveIndex(-1);
+              }}
+              aria-pressed={scope === s}
+              className={`rounded-full px-3 py-1 text-xs font-medium transition-colors whitespace-nowrap ${
+                scope === s
+                  ? "bg-brand-primary text-white"
+                  : "bg-bg-elevated text-text-secondary hover:bg-bg-muted hover:text-text-primary border border-border-default"
+              }`}
+            >
+              {translateCopy(labelKey)}
+            </button>
+          ))}
+        </div>
 
-          {!error && query && !loading && !hasResults && (
-            <p className="px-3 py-4 text-center text-sm text-text-muted">{translateCopy("ui.no_results_for_2a5f91d")}{query}&rdquo;</p>
-          )}
-
-          {!error && !query && (
-            <p className="px-3 py-4 text-center text-sm text-text-muted">{translateCopy("ui.type_to_search_trades_users_and__6fdf7a0")}</p>
-          )}
-
-          {hasResults &&
-            (Object.keys(CATEGORY_LABELS) as Array<keyof GroupedResults>).map((category) => {
+        {/* ── Results / recent searches / hints ─────────────────────────── */}
+        {isExpanded ? (
+          /* Listbox is only rendered when there are results — keeps the ARIA
+             contract clean: the listbox only ever contains option elements. */
+          <div
+            id={RESULTS_LISTBOX_ID}
+            className="max-h-[60vh] overflow-y-auto p-2"
+            role="listbox"
+            aria-label={translateCopy("ui.search_results_0144dae")}
+          >
+            {(Object.keys(CATEGORY_LABELS) as Array<keyof GroupedResults>).map((category) => {
+              if (!visibleCategories.includes(category)) return null;
               const items = results[category];
               if (items.length === 0) return null;
 
-              const baseOffset =
-                category === "trades"
-                  ? 0
-                  : category === "users"
-                    ? results.trades.length
-                    : results.trades.length + results.users.length;
+              // Compute offset within the filtered allItems array
+              const baseOffset = allItems.findIndex((item) => item.category === category);
 
               return (
-                <div key={category} className="mb-1" role="group" aria-labelledby={`search-group-${category}`}>
-                  <p id={`search-group-${category}`} className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-widest text-text-muted">
+                <div
+                  key={category}
+                  className="mb-1"
+                  role="group"
+                  aria-labelledby={`search-group-${category}`}
+                >
+                  <p
+                    id={`search-group-${category}`}
+                    className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-widest text-text-muted"
+                  >
                     {CATEGORY_LABELS[category]}
                   </p>
                   {items.map((item, idx) => {
@@ -333,7 +512,9 @@ export function GlobalSearch({ onClose }: GlobalSearchProps) {
                       >
                         <span className="flex-1 text-sm font-medium truncate">{item.title}</span>
                         {item.subtitle && (
-                          <span className="text-xs text-text-muted truncate max-w-[40%]">{item.subtitle}</span>
+                          <span className="text-xs text-text-muted truncate max-w-[40%]">
+                            {item.subtitle}
+                          </span>
                         )}
                       </button>
                     );
@@ -341,6 +522,85 @@ export function GlobalSearch({ onClose }: GlobalSearchProps) {
                 </div>
               );
             })}
+          </div>
+        ) : (
+          <div className="p-2">
+            {error && (
+              <p className="px-3 py-4 text-center text-sm text-status-danger">{error}</p>
+            )}
+
+            {/* No results for this query */}
+            {!error && query && !loading && !hasAnyResults && (
+              <p role="status" className="px-3 py-4 text-center text-sm text-text-muted">
+                {translateCopy("ui.no_results_for_2a5f91d")}
+                {query}&rdquo;
+              </p>
+            )}
+
+            {/* No results for this scope (but other categories have results) */}
+            {!error && query && !loading && hasAnyResults && !hasResults && (
+              <p role="status" className="px-3 py-4 text-center text-sm text-text-muted">
+                {translateCopy("ui.no_results_for_2a5f91d")}
+                {query}&rdquo;
+              </p>
+            )}
+
+            {/* Recent searches */}
+            {showRecentSearches && (
+              <div>
+                <div className="flex items-center justify-between px-3 py-1.5">
+                  <p className="text-[10px] font-semibold uppercase tracking-widest text-text-muted">
+                    {translateCopy("ui.recent_searches_3b1e8a2")}
+                  </p>
+                  <button
+                    onClick={handleClearRecent}
+                    className="text-xs text-text-muted hover:text-text-secondary transition-colors"
+                  >
+                    {translateCopy("ui.clear_recent_searches_a4d7f12")}
+                  </button>
+                </div>
+                <ul role="list">
+                  {recentSearches.map((term) => (
+                    <li key={term}>
+                      <button
+                        onClick={() => handleRecentSearchClick(term)}
+                        className="w-full flex items-center gap-3 rounded-lg px-3 py-2 text-left text-sm text-text-secondary hover:bg-bg-elevated hover:text-text-primary transition-colors"
+                      >
+                        <svg
+                          className="w-3.5 h-3.5 flex-shrink-0 text-text-muted"
+                          viewBox="0 0 16 16"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="1.6"
+                          aria-hidden="true"
+                        >
+                          <circle cx="8" cy="8" r="6" />
+                          <path d="M8 5v3l2 2" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                        {term}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {/* Idle hint (no query, no recent searches) */}
+            {showHint && (
+              <p
+                id={SEARCH_HINT_ID}
+                className="px-3 py-4 text-center text-sm text-text-muted"
+              >
+                {translateCopy("ui.type_to_search_trades_users_and__6fdf7a0")}
+              </p>
+            )}
+
+            {/* Hint element must always exist in the DOM when the hint is
+                the active describedby target, so keep it hidden when not
+                visible to avoid stale aria-describedby references. */}
+            {!showHint && (
+              <span id={SEARCH_HINT_ID} className="sr-only" aria-hidden="true" />
+            )}
           </div>
         )}
       </div>

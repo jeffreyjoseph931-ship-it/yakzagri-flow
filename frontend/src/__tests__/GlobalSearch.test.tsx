@@ -3,8 +3,9 @@
  *
  * Covers: keyboard trigger, search input, results display,
  *         empty results, navigation on select, error state,
- *         the ARIA combobox contract, and focus management
- *         (focus into the dialog, Tab containment, focus return).
+ *         the ARIA combobox contract, focus management
+ *         (focus into the dialog, Tab containment, focus return),
+ *         recent searches persistence, and scope filter pills.
  */
 
 import { render, screen, waitFor, act, fireEvent } from "@testing-library/react";
@@ -61,8 +62,12 @@ const MOCK_RESULTS = {
   contracts: [{ id: "c1", title: "Contract AMN-99" }],
 };
 
+/** localStorage key used by the component under test. */
+const RECENT_KEY = "eziagric:recentSearches";
+
 beforeEach(() => {
   jest.clearAllMocks();
+  localStorage.clear();
   mockUseRouter.mockReturnValue({ push: mockPush } as unknown as ReturnType<typeof useRouter>);
   mockUseAuth.mockReturnValue(MOCK_AUTH);
   mockSearch.mockResolvedValue(MOCK_RESULTS);
@@ -438,5 +443,276 @@ describe("GlobalSearch — navigation on select", () => {
 
     await userEvent.click(screen.getByText("Contract AMN-99"));
     expect(mockPush).toHaveBeenCalledWith("/streams/c1");
+  });
+});
+
+// ── Recent searches ───────────────────────────────────────────────────────────
+
+describe("GlobalSearch — recent searches", () => {
+  it("shows the idle hint when there are no recent searches", () => {
+    render(<GlobalSearch />);
+    pressMetaK();
+
+    expect(screen.getByText(/type to search/i)).toBeInTheDocument();
+    expect(screen.queryByText(/recent searches/i)).not.toBeInTheDocument();
+  });
+
+  it("displays up to 5 stored recent searches when opened with an empty input", () => {
+    localStorage.setItem(
+      RECENT_KEY,
+      JSON.stringify(["maize", "trade #001", "wheat", "contract AMN", "soybeans"]),
+    );
+
+    render(<GlobalSearch />);
+    pressMetaK();
+
+    expect(screen.getByText(/recent searches/i)).toBeInTheDocument();
+    expect(screen.getByText("maize")).toBeInTheDocument();
+    expect(screen.getByText("trade #001")).toBeInTheDocument();
+    expect(screen.getByText("wheat")).toBeInTheDocument();
+    expect(screen.getByText("contract AMN")).toBeInTheDocument();
+    expect(screen.getByText("soybeans")).toBeInTheDocument();
+    // Idle hint should NOT be shown when there are recent searches
+    expect(screen.queryByText(/type to search/i)).not.toBeInTheDocument();
+  });
+
+  it("does not display more than 5 recent searches", () => {
+    localStorage.setItem(
+      RECENT_KEY,
+      JSON.stringify(["one", "two", "three", "four", "five", "six"]),
+    );
+
+    render(<GlobalSearch />);
+    pressMetaK();
+
+    const recentItems = screen
+      .getAllByRole("listitem")
+      .filter((el) => el.closest('[role="list"]'));
+    // The list should have at most 5 items
+    expect(recentItems.length).toBeLessThanOrEqual(5);
+    expect(screen.queryByText("six")).not.toBeInTheDocument();
+  });
+
+  it("persists a successful search query to localStorage", async () => {
+    jest.useFakeTimers();
+    const user = userEvent.setup({ advanceTimers: jest.advanceTimersByTime });
+
+    render(<GlobalSearch />);
+    pressMetaK();
+    await user.type(screen.getByRole("combobox"), "maize");
+    act(() => jest.advanceTimersByTime(300));
+
+    await waitFor(() => expect(mockSearch).toHaveBeenCalled());
+
+    const stored = JSON.parse(localStorage.getItem(RECENT_KEY) ?? "[]") as string[];
+    expect(stored).toContain("maize");
+
+    jest.useRealTimers();
+  });
+
+  it("prepends the newest query and deduplicates", async () => {
+    localStorage.setItem(RECENT_KEY, JSON.stringify(["maize"]));
+
+    jest.useFakeTimers();
+    const user = userEvent.setup({ advanceTimers: jest.advanceTimersByTime });
+
+    render(<GlobalSearch />);
+    pressMetaK();
+    // Type the same term again
+    await user.type(screen.getByRole("combobox"), "maize");
+    act(() => jest.advanceTimersByTime(300));
+
+    await waitFor(() => expect(mockSearch).toHaveBeenCalled());
+
+    const stored = JSON.parse(localStorage.getItem(RECENT_KEY) ?? "[]") as string[];
+    // Should only appear once, at the front
+    expect(stored.filter((q) => q === "maize")).toHaveLength(1);
+    expect(stored[0]).toBe("maize");
+
+    jest.useRealTimers();
+  });
+
+  it("clicking a recent search populates the input field", async () => {
+    localStorage.setItem(RECENT_KEY, JSON.stringify(["wheat trade"]));
+    const user = userEvent.setup();
+
+    render(<GlobalSearch />);
+    pressMetaK();
+
+    await user.click(screen.getByText("wheat trade"));
+
+    expect(screen.getByRole("combobox")).toHaveValue("wheat trade");
+  });
+
+  it("clears all recent searches when the Clear recent button is clicked", async () => {
+    localStorage.setItem(RECENT_KEY, JSON.stringify(["maize", "wheat"]));
+    const user = userEvent.setup();
+
+    render(<GlobalSearch />);
+    pressMetaK();
+
+    expect(screen.getByText("maize")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /clear recent/i }));
+
+    expect(screen.queryByText("maize")).not.toBeInTheDocument();
+    expect(screen.queryByText("wheat")).not.toBeInTheDocument();
+    // Should fall back to the idle hint
+    expect(screen.getByText(/type to search/i)).toBeInTheDocument();
+    expect(localStorage.getItem(RECENT_KEY)).toBeNull();
+  });
+
+  it("hides recent searches once the user starts typing", async () => {
+    localStorage.setItem(RECENT_KEY, JSON.stringify(["maize"]));
+    const user = userEvent.setup();
+
+    render(<GlobalSearch />);
+    pressMetaK();
+
+    expect(screen.getByText("maize")).toBeInTheDocument();
+
+    await user.type(screen.getByRole("combobox"), "w");
+
+    expect(screen.queryByText(/recent searches/i)).not.toBeInTheDocument();
+  });
+
+  it("re-shows recent searches after clearing the input", async () => {
+    localStorage.setItem(RECENT_KEY, JSON.stringify(["maize"]));
+    const user = userEvent.setup();
+
+    render(<GlobalSearch />);
+    pressMetaK();
+
+    await user.type(screen.getByRole("combobox"), "w");
+    expect(screen.queryByText(/recent searches/i)).not.toBeInTheDocument();
+
+    await user.clear(screen.getByRole("combobox"));
+
+    await waitFor(() =>
+      expect(screen.getByText(/recent searches/i)).toBeInTheDocument(),
+    );
+  });
+});
+
+// ── Scope filter pills ────────────────────────────────────────────────────────
+
+describe("GlobalSearch — scope filter pills", () => {
+  it("renders all four scope filter pills when open", () => {
+    render(<GlobalSearch />);
+    pressMetaK();
+
+    expect(screen.getByRole("button", { name: /^all$/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^trades$/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^streams$/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^disputes$/i })).toBeInTheDocument();
+  });
+
+  it("defaults to the All pill being pressed", () => {
+    render(<GlobalSearch />);
+    pressMetaK();
+
+    expect(screen.getByRole("button", { name: /^all$/i })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByRole("button", { name: /^trades$/i })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+  });
+
+  it("switches the pressed state when a pill is clicked", async () => {
+    const user = userEvent.setup();
+    render(<GlobalSearch />);
+    pressMetaK();
+
+    await user.click(screen.getByRole("button", { name: /^trades$/i }));
+
+    expect(screen.getByRole("button", { name: /^trades$/i })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByRole("button", { name: /^all$/i })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+  });
+
+  it("Trades scope shows only trade results", async () => {
+    const user = userEvent.setup();
+    render(<GlobalSearch />);
+    pressMetaK();
+
+    await user.click(screen.getByRole("button", { name: /^trades$/i }));
+    await typeQuery("trade");
+
+    await waitFor(() => expect(screen.getByText("Trade #001")).toBeInTheDocument());
+    expect(screen.queryByText("Alice Seller")).not.toBeInTheDocument();
+    expect(screen.queryByText("Contract AMN-99")).not.toBeInTheDocument();
+  });
+
+  it("Streams scope shows only contract results", async () => {
+    const user = userEvent.setup();
+    render(<GlobalSearch />);
+    pressMetaK();
+
+    await user.click(screen.getByRole("button", { name: /^streams$/i }));
+    await typeQuery("contract");
+
+    await waitFor(() => expect(screen.getByText("Contract AMN-99")).toBeInTheDocument());
+    expect(screen.queryByText("Trade #001")).not.toBeInTheDocument();
+    expect(screen.queryByText("Alice Seller")).not.toBeInTheDocument();
+  });
+
+  it("Disputes scope shows a no-results status (no disputes category in API yet)", async () => {
+    const user = userEvent.setup();
+    render(<GlobalSearch />);
+    pressMetaK();
+
+    await user.click(screen.getByRole("button", { name: /^disputes$/i }));
+    await typeQuery("dispute");
+
+    await waitFor(() => expect(screen.getByRole("status")).toBeInTheDocument());
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  });
+
+  it("All scope shows results from all categories", async () => {
+    const user = userEvent.setup();
+    render(<GlobalSearch />);
+    pressMetaK();
+
+    // Start on Trades, then switch back to All
+    await user.click(screen.getByRole("button", { name: /^trades$/i }));
+    await user.click(screen.getByRole("button", { name: /^all$/i }));
+    await typeQuery("trade");
+
+    await waitFor(() => expect(screen.getByText("Trade #001")).toBeInTheDocument());
+    expect(screen.getByText("Alice Seller")).toBeInTheDocument();
+    expect(screen.getByText("Contract AMN-99")).toBeInTheDocument();
+  });
+
+  it("resets scope to All when the dialog is reopened", async () => {
+    const user = userEvent.setup();
+    render(<GlobalSearch />);
+    pressMetaK();
+
+    await user.click(screen.getByRole("button", { name: /^trades$/i }));
+    expect(screen.getByRole("button", { name: /^trades$/i })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+
+    // Close and reopen
+    pressEscape();
+    pressMetaK();
+
+    expect(screen.getByRole("button", { name: /^all$/i })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByRole("button", { name: /^trades$/i })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
   });
 });
