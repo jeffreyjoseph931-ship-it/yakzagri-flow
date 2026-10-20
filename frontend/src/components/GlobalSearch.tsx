@@ -57,7 +57,14 @@ function loadRecentSearches(): string[] {
     const raw = localStorage.getItem(RECENT_SEARCHES_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as string[]) : [];
+    if (!Array.isArray(parsed)) return [];
+    return Array.from(
+      new Set(
+        parsed.filter(
+          (query): query is string => typeof query === "string" && query.trim().length > 0,
+        ),
+      ),
+    ).slice(0, MAX_RECENT_SEARCHES);
   } catch {
     return [];
   }
@@ -210,8 +217,6 @@ export function GlobalSearch({ onClose }: GlobalSearchProps) {
     if (!isOpen) return;
 
     if (!query.trim()) {
-      setResults(EMPTY_RESULTS);
-      setError(null);
       return;
     }
 
@@ -411,7 +416,14 @@ export function GlobalSearch({ onClose }: GlobalSearchProps) {
             aria-describedby={showHint ? SEARCH_HINT_ID : undefined}
             placeholder={translateCopy("ui.search_trades_users_contracts_204acaf")}
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            onChange={(e) => {
+              const value = e.target.value;
+              setQuery(value);
+              if (!value.trim()) {
+                setResults(EMPTY_RESULTS);
+                setError(null);
+              }
+            }}
             onKeyDown={handleKeyNavigation}
             className="flex-1 bg-transparent text-sm text-text-primary placeholder:text-text-muted outline-none"
           />
@@ -440,7 +452,7 @@ export function GlobalSearch({ onClose }: GlobalSearchProps) {
         {/* ── Scope filter pills ─────────────────────────────────────────── */}
         <div
           role="group"
-          aria-label="Filter by category"
+          aria-label={translateCopy("ui.filter_by_category_bcd139c")}
           className="flex items-center gap-1.5 px-4 py-2 border-b border-border-default overflow-x-auto"
         >
           {SCOPE_PILLS.map(({ scope: s, labelKey }) => (

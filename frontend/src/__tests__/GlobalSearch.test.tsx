@@ -8,7 +8,7 @@
  *         recent searches persistence, and scope filter pills.
  */
 
-import { render, screen, waitFor, act, fireEvent } from "@testing-library/react";
+import { render, screen, waitFor, act, fireEvent, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { GlobalSearch } from "@/components/GlobalSearch";
 import { api } from "@/lib/api";
@@ -301,23 +301,28 @@ describe("GlobalSearch — focus management", () => {
     await waitFor(() => expect(screen.getByRole("combobox")).toHaveFocus());
   });
 
-  it("keeps Tab cycling inside the dialog", async () => {
+  it("keeps Tab cycling through the dialog controls", async () => {
     const user = userEvent.setup();
     render(<GlobalSearch />);
     pressMetaK();
 
     const combobox = screen.getByRole("combobox");
     const closeButton = screen.getByRole("button", { name: /close search/i });
+    const allFilter = screen.getByRole("button", { name: /^all$/i });
+    const tradesFilter = screen.getByRole("button", { name: /^trades$/i });
     await waitFor(() => expect(combobox).toHaveFocus());
 
     await user.tab();
     expect(closeButton).toHaveFocus();
 
     await user.tab();
-    expect(combobox).toHaveFocus();
+    expect(allFilter).toHaveFocus();
+
+    await user.tab();
+    expect(tradesFilter).toHaveFocus();
 
     await user.tab({ shift: true });
-    expect(closeButton).toHaveFocus();
+    expect(allFilter).toHaveFocus();
   });
 
   it("closes on backdrop click and restores focus to the trigger", async () => {
@@ -344,9 +349,10 @@ describe("GlobalSearch — results display", () => {
     await typeQuery("trade");
     await waitFor(() => expect(screen.getByText("Trade #001")).toBeInTheDocument());
 
-    expect(screen.getByText("Trades")).toBeInTheDocument();
-    expect(screen.getByText("Users")).toBeInTheDocument();
-    expect(screen.getByText("Contracts")).toBeInTheDocument();
+    const results = within(screen.getByRole("listbox"));
+    expect(results.getByText("Trades")).toBeInTheDocument();
+    expect(results.getByText("Users")).toBeInTheDocument();
+    expect(results.getByText("Contracts")).toBeInTheDocument();
     expect(screen.getByText("Alice Seller")).toBeInTheDocument();
     expect(screen.getByText("Contract AMN-99")).toBeInTheDocument();
   });

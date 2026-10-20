@@ -417,6 +417,7 @@ const messages = {
     "filter_trades_8e3f1d4": "Trades",
     "filter_streams_5b7c2e8": "Streams",
     "filter_disputes_9d4a6f1": "Disputes",
+    "filter_by_category_bcd139c": "Filter by category",
     "theme_preference_4169800": "Theme preference",
     "confirm_clawback_57d9d44": "Confirm clawback",
     "this_immediately_reduces_the_str_1e72f81": "This immediately reduces the stream's vested balance and cannot be undone. Review the details before confirming.",

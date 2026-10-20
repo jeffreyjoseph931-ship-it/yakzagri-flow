@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { CheckCircle, AlertTriangle, XCircle, Info, X } from "lucide-react";
 import { ToastMessage } from "@/types/toast";
 import { clsx } from "clsx";
@@ -19,8 +19,20 @@ export function Toast({
   onClose,
 }: ToastProps) {
   const [isClosing, setIsClosing] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const timerStartedAtRef = useRef<number | null>(null);
+  const remainingDurationRef = useRef(duration);
+  const isHoveredRef = useRef(false);
+  const isFocusedRef = useRef(false);
+  const isClosingRef = useRef(false);
 
   const handleClose = useCallback(() => {
+    if (isClosingRef.current) return;
+    isClosingRef.current = true;
+    if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    timeoutRef.current = null;
+    timerStartedAtRef.current = null;
     setIsClosing(true);
     // Wait for the slide-out/fade-out animation to finish before actually removing it
     setTimeout(() => {
@@ -29,12 +41,39 @@ export function Toast({
   }, [id, onClose]);
 
   useEffect(() => {
-    if (duration > 0) {
-      const timer = setTimeout(() => {
-        handleClose();
-      }, duration);
-      return () => clearTimeout(timer);
+    remainingDurationRef.current = duration;
+    if (duration <= 0) return;
+
+    timerStartedAtRef.current = Date.now();
+    timeoutRef.current = setTimeout(handleClose, duration);
+    return () => {
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+      timeoutRef.current = null;
+      timerStartedAtRef.current = null;
+    };
+  }, [duration, handleClose]);
+
+  const pauseTimer = useCallback(() => {
+    if (!timeoutRef.current) return;
+
+    clearTimeout(timeoutRef.current);
+    timeoutRef.current = null;
+    if (timerStartedAtRef.current !== null) {
+      remainingDurationRef.current = Math.max(
+        0,
+        remainingDurationRef.current - (Date.now() - timerStartedAtRef.current),
+      );
     }
+    timerStartedAtRef.current = null;
+    setIsPaused(true);
+  }, []);
+
+  const resumeTimer = useCallback(() => {
+    if (duration <= 0 || timeoutRef.current || isClosingRef.current) return;
+
+    timerStartedAtRef.current = Date.now();
+    timeoutRef.current = setTimeout(handleClose, remainingDurationRef.current);
+    setIsPaused(false);
   }, [duration, handleClose]);
 
   const IconMap = {
@@ -76,6 +115,24 @@ export function Toast({
 
   return (
     <div
+      onMouseEnter={() => {
+        isHoveredRef.current = true;
+        pauseTimer();
+      }}
+      onMouseLeave={() => {
+        isHoveredRef.current = false;
+        if (!isFocusedRef.current) resumeTimer();
+      }}
+      onFocusCapture={() => {
+        isFocusedRef.current = true;
+        pauseTimer();
+      }}
+      onBlurCapture={(event) => {
+        const nextTarget = event.relatedTarget;
+        if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) return;
+        isFocusedRef.current = false;
+        if (!isHoveredRef.current) resumeTimer();
+      }}
       className={clsx(
         baseClasses,
         animationClasses,
@@ -108,6 +165,7 @@ export function Toast({
           className="toast-progress absolute bottom-0 left-0 h-1 w-full bg-current opacity-20"
           style={{
             animationDuration: `${duration}ms`,
+            animationPlayState: isPaused ? "paused" : "running",
           }}
         />
       )}
